@@ -1,6 +1,4 @@
-@selected_service := param("Service", type: string, optional: true)
-
-filter is_null(@selected_service) or ^Service.name = @selected_service
-
+$selected_service <- param("Service", type: string, optional: true)
+filter not is_null($selected_service) and ^Service.name = $selected_service
 align A_CPUUtilization_sum:avg(m("CPUUtilization"))
 aggregate A_CPUUtilization_sum:sum(A_CPUUtilization_sum), group_by(^Service.name)
