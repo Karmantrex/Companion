@@ -1,2 +1,4 @@
+filter !is_null(m("Service"))
+
 align A_MemoryUtilization_sum:avg(m("MemoryUtilization"))
 aggregate A_MemoryUtilization_sum:sum(A_MemoryUtilization_sum), group_by(^Service...)
