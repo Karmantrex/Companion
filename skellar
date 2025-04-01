@@ -1,4 +1,6 @@
-filter !is_null(m("Service"))
+@selected_service := param("Service", type: string, optional: true)
 
-align A_MemoryUtilization_sum:avg(m("MemoryUtilization"))
-aggregate A_MemoryUtilization_sum:sum(A_MemoryUtilization_sum), group_by(^Service...)
+filter is_null(@selected_service) or ^Service.name = @selected_service
+
+align A_CPUUtilization_sum:avg(m("CPUUtilization"))
+aggregate A_CPUUtilization_sum:sum(A_CPUUtilization_sum), group_by(^Service.name)
