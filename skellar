@@ -1,4 +1,236 @@
-$selected_service <- param("Service", type: string, optional: true)
-filter not is_null($selected_service) and ^Service.name = $selected_service
-align A_CPUUtilization_sum:avg(m("CPUUtilization"))
-aggregate A_CPUUtilization_sum:sum(A_CPUUtilization_sum), group_by(^Service.name)
+#!/bin/bash
+# ******************************** WORKING SCRIPT *************************************
+# ====================================================================================
+# Focus Monitor Setup Script with Logging and Tamper-Proof Locking
+#
+# This script implements the following features:
+#
+# 1) Password Setup & Lock:  
+#    - On the first run (with no arguments), you'll be prompted to create a password.  
+#    - Once set, it tells you to start the application using "./setup_focus_monitor.sh start"
+#
+# 2) Start Command ("start"):  
+#    - Prompts for the password.  
+#    - Creates the monitoring script (which checks every second if "Focus" and "FocusMe" are running).
+#      - If "Focus" is not running, it simulates launching it via Spotlight.
+#      - If "FocusMe" is not running, it opens Terminal to execute: open ~/Applications/FocusMe.app
+#    - Creates a LaunchAgent plist so that the monitor runs automatically at login.
+#    - Loads the LaunchAgent.
+#    - Locks this setup script (making it read-only) so it cannot be tampered with.
+#
+# 3) Stop Command ("stop"):  
+#    - Prompts for the password.  
+#    - Unloads the LaunchAgent (thus stopping the monitor).
+#    - Unlocks this setup script (making it writable so you can edit if needed).
+#
+# 4) Logging:  
+#    - All errors and key events are logged to ~/.focus_monitor.log.
+#
+# =============================================================================
+
+LOGFILE="$HOME/.focus_monitor.log"
+
+log_info() {
+  echo "$(date '+%Y-%m-%d %H:%M:%S') [INFO] $1" >> "$LOGFILE"
+}
+
+log_error() {
+  echo "$(date '+%Y-%m-%d %H:%M:%S') [ERROR] $1" >> "$LOGFILE"
+}
+
+PASSFILE="$HOME/.focus_monitor.pass"
+SCRIPT_DIR="$HOME/scripts"
+MONITOR_SCRIPT="$SCRIPT_DIR/focus_monitor.sh"
+LAUNCHAGENT_DIR="$HOME/Library/LaunchAgents"
+LAUNCHAGENT_PLIST="$LAUNCHAGENT_DIR/com.$USER.focusmonitor.plist"
+SELF="$(cd "$(dirname "$0")" && pwd)/$(basename "$0")"
+
+verify_password() {
+    read -s -p "Enter password: " input_pass
+    echo
+    if [ ! -f "$PASSFILE" ]; then
+        log_error "Password file not found during verification."
+        echo "Password file not found. Exiting."
+        exit 1
+    fi
+    stored_hash=$(cat "$PASSFILE")
+    input_hash=$(echo -n "$input_pass" | shasum -a 256 | awk '{print $1}')
+    if [ "$input_hash" != "$stored_hash" ]; then
+        log_error "Incorrect password attempt."
+        echo "Incorrect password. Exiting."
+        exit 1
+    fi
+}
+
+usage() {
+    echo "Usage: $0 [start|stop]"
+    exit 1
+}
+
+# If no arguments provided, perform password setup if not already set.
+if [ "$#" -eq 0 ]; then
+    if [ ! -f "$PASSFILE" ]; then
+        echo "No password set. Let's set it up."
+        read -s -p "Enter new password: " pass1
+        echo
+        read -s -p "Re-enter new password: " pass2
+        echo
+        if [ "$pass1" != "$pass2" ]; then
+            log_error "Password mismatch during setup."
+            echo "Passwords do not match. Exiting."
+            exit 1
+        fi
+        echo -n "$pass1" | shasum -a 256 | awk '{print $1}' > "$PASSFILE" || { log_error "Failed to write password file."; echo "Failed to write password file."; exit 1; }
+        log_info "Password setup completed successfully."
+        echo "Password setup complete. You can now start the application using: $0 start"
+        exit 0
+    else
+        echo "Password is already set. Use '$0 start' to launch or '$0 stop' to stop the monitor."
+        exit 1
+    fi
+fi
+
+case "$1" in
+    start)
+        # --- Start Command ---
+        verify_password
+
+        # Create the directory for the monitoring script
+        mkdir -p "$SCRIPT_DIR" || { log_error "Failed to create script directory at $SCRIPT_DIR."; echo "Failed to create script directory."; exit 1; }
+        log_info "Script directory ensured at $SCRIPT_DIR."
+
+        # Write the monitoring script that continuously monitors "Focus" and "FocusMe"
+        cat << 'EOF' > "$MONITOR_SCRIPT"
+#!/bin/bash
+# ================================
+# Focus Monitor Script with Logging
+#
+# This script continuously monitors if "Focus" and "FocusMe" applications are running.
+# - If "Focus" is not running, it attempts to launch it via Spotlight.
+# - If "FocusMe" is not running, it opens Terminal to execute: open ~/Applications/FocusMe.app
+#
+# All events are logged to $HOME/.focus_monitor.log.
+# ================================
+
+LOGFILE="$HOME/.focus_monitor.log"
+
+log_info() {
+  echo "$(date '+%Y-%m-%d %H:%M:%S') [INFO] $1" >> "$LOGFILE"
+}
+
+log_error() {
+  echo "$(date '+%Y-%m-%d %H:%M:%S') [ERROR] $1" >> "$LOGFILE"
+}
+
+while true; do
+    # Use case-insensitive matching with pgrep (-xi) to detect "Focus" (or variants)
+    if ! pgrep -xi "focus" > /dev/null 2>&1; then
+        log_info "'Focus' not running. Attempting to launch via Spotlight."
+        osascript <<ASCRIPT
+tell application "System Events"
+    key code 49 using {command down} -- Open Spotlight (Cmd+Space)
+    delay 0.5
+    keystroke "focus.app"
+    delay 0.5
+    key code 36 -- Press Enter
+end tell
+ASCRIPT
+        if [ $? -ne 0 ]; then
+            log_error "Failed to launch 'Focus' via Spotlight."
+        fi
+    fi
+
+    # Use case-insensitive matching with pgrep (-xi) to detect "FocusMe" (or variants)
+    if ! pgrep -xi "focusme" > /dev/null 2>&1; then
+        log_info "'FocusMe' not running. Attempting to launch via Terminal."
+        osascript <<ASCRIPT
+tell application "Terminal"
+    do script "open ~/Applications/FocusMe.app"
+    activate
+end tell
+ASCRIPT
+        if [ $? -ne 0 ]; then
+            log_error "Failed to launch 'FocusMe' via Terminal."
+        fi
+    fi
+
+    sleep 1
+done
+EOF
+
+        if [ $? -ne 0 ]; then
+            log_error "Failed to create monitoring script at $MONITOR_SCRIPT."
+            echo "Failed to create monitoring script."
+            exit 1
+        fi
+        log_info "Monitoring script created at $MONITOR_SCRIPT."
+
+        # Make the monitoring script executable.
+        chmod +x "$MONITOR_SCRIPT" || { log_error "Failed to set executable permission on $MONITOR_SCRIPT."; echo "Failed to set permissions."; exit 1; }
+        log_info "Monitoring script permissions set."
+
+        # Create the LaunchAgent plist to run the monitoring script at login.
+        mkdir -p "$LAUNCHAGENT_DIR" || { log_error "Failed to create LaunchAgent directory at $LAUNCHAGENT_DIR."; echo "Failed to create LaunchAgent directory."; exit 1; }
+        cat << EOF > "$LAUNCHAGENT_PLIST"
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+  <dict>
+    <key>Label</key>
+    <string>com.$USER.focusmonitor</string>
+    <key>ProgramArguments</key>
+    <array>
+      <string>$MONITOR_SCRIPT</string>
+    </array>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+  </dict>
+</plist>
+EOF
+
+        if [ $? -ne 0 ]; then
+            log_error "Failed to create LaunchAgent plist at $LAUNCHAGENT_PLIST."
+            echo "Failed to create LaunchAgent plist."
+            exit 1
+        fi
+        log_info "LaunchAgent plist created at $LAUNCHAGENT_PLIST."
+
+        # Load the LaunchAgent so the monitoring script runs at startup.
+        launchctl load "$LAUNCHAGENT_PLIST" 2>> "$LOGFILE"
+        if [ $? -ne 0 ]; then
+            log_error "Failed to load LaunchAgent plist."
+            echo "Failed to load LaunchAgent."
+            exit 1
+        fi
+        log_info "LaunchAgent loaded successfully."
+
+        # Lock this setup script by making it read-only.
+        chmod 444 "$SELF" || { log_error "Failed to lock setup script."; echo "Failed to lock setup script."; exit 1; }
+        log_info "Setup script locked (read-only)."
+        echo "Focus monitor started. Check log file at $LOGFILE for details."
+        ;;
+        
+    stop)
+        # --- Stop Command ---
+        verify_password
+
+        launchctl unload "$LAUNCHAGENT_PLIST" 2>> "$LOGFILE"
+        if [ $? -ne 0 ]; then
+            log_error "Failed to unload LaunchAgent plist."
+            echo "Failed to unload LaunchAgent."
+            exit 1
+        fi
+        log_info "LaunchAgent unloaded successfully."
+
+        # Unlock the setup script to allow modifications.
+        chmod 644 "$SELF" || { log_error "Failed to unlock setup script."; echo "Failed to unlock setup script."; exit 1; }
+        log_info "Setup script unlocked (writable)."
+        echo "Focus monitor stopped. Check log file at $LOGFILE for details."
+        ;;
+        
+    *)
+        usage
+        ;;
+esac
